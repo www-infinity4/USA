@@ -3,6 +3,7 @@
   const programs=window.USA_PROGRAMS||{};
   const template=window.USA_DAY_TEMPLATE||[];
   const failedVideoIds=new Set();
+  const finishedIntroIds=new Set();
   const $=id=>document.getElementById(id);
   const els={clock:$("stationClock"),title:$("nowTitle"),meta:$("nowMeta"),time:$("programTime"),player:$("player"),card:$("stationCard"),cardTitle:$("stationCardTitle"),enter:$("enterButton"),live:$("liveButton"),start:$("startOverButton"),rewind:$("rewindButton"),share:$("shareButton"),shareStatus:$("shareStatus"),guide:$("guideRows"),next:$("nextCards"),progress:$("progressBar"),position:$("positionLabel")};
 
@@ -29,7 +30,7 @@
   }
   function ensureSchedule(ms){const key=dayKey(ms);if(key!==scheduleKey){scheduleKey=key;schedule=buildSchedule(ms);renderGuide();}}
   function currentClock(){return mode==="live"?Date.now():shiftBaseMs+(Date.now()-shiftStartedMs);}
-  function resolve(ms){ensureSchedule(ms);let block=schedule.find(x=>ms>=x.startsAtMs&&ms<x.endsAtMs)||schedule[0];if(!block)return null;const elapsed=Math.max(0,Math.floor((ms-block.startsAtMs)/1000));const runtime=Math.min(block.movie.runtimeSeconds||block.blockSeconds,block.blockSeconds);return {block,elapsed,runtime,mediaSeconds:Math.min(elapsed,Math.max(0,runtime-1)),programActive:elapsed<runtime};}
+  function resolve(ms){ensureSchedule(ms);let block=schedule.find(x=>ms>=x.startsAtMs&&ms<x.endsAtMs)||schedule[0];if(!block)return null;const elapsed=Math.max(0,Math.floor((ms-block.startsAtMs)/1000));const introId=block.movie.introVideoId;const introSeconds=Math.max(0,Number(block.movie.introSeconds)||0);const introActive=!!introId&&!failedVideoIds.has(introId)&&!finishedIntroIds.has(introId)&&elapsed<introSeconds;const activeVideoId=introActive?introId:block.movie.videoId;const movieElapsed=Math.max(0,elapsed-(introId?introSeconds:0));const movieRuntime=Math.min(block.movie.runtimeSeconds||block.blockSeconds,block.blockSeconds);const mediaSeconds=introActive?elapsed:Math.min(movieElapsed,Math.max(0,movieRuntime-1));return {block,elapsed,runtime:movieRuntime,mediaSeconds,activeVideoId,isIntro:introActive,programActive:introActive||movieElapsed<movieRuntime};}
   function fmt(ms){return new Date(ms).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});}
   function art(item){return item&&item.videoId?`https://i.ytimg.com/vi/${item.videoId}/maxresdefault.jpg`:"";}
   function updateArt(item){document.body.style.setProperty("--program-art",`url('${art(item)}')`);}
@@ -40,24 +41,24 @@
   function loadApi(){if(apiRequested||playerReady)return;apiRequested=true;if(window.YT&&window.YT.Player){window.onYouTubeIframeAPIReady();return;}const s=document.createElement("script");s.src="https://www.youtube.com/iframe_api";document.head.appendChild(s);}
   function quarantineCurrent(reason){
     const state=resolve(currentClock());
-    const videoId=state?.block?.movie?.videoId;
+    const videoId=state?.activeVideoId;
     if(!videoId||failedVideoIds.has(videoId))return;
     failedVideoIds.add(videoId);
     clearTimeout(playbackTimer);
-    scheduleKey="";
+    if(!state?.isIntro)scheduleKey="";
     loadedKey="";
     ensureSchedule(Date.now());
     recoveryCount++;
     showStation(reason||"Source unavailable — switching to another full program");
     setTimeout(()=>sync(true),150);
   }
-  function verifyPlayback(videoId){
+  function verifyPlayback(videoId,allowShort){
     clearTimeout(playbackTimer);
     playbackTimer=setTimeout(()=>{
       if(!player||loadedKey.indexOf(videoId)<0)return;
       let state=-1,duration=0;
       try{state=player.getPlayerState();duration=Number(player.getDuration())||0;}catch(_){}
-      if(state===YT.PlayerState.PLAYING&&duration>=1200){recoveryCount=0;return;}
+      if(state===YT.PlayerState.PLAYING&&(allowShort||duration>=1200)){recoveryCount=0;return;}
       quarantineCurrent(duration>0&&duration<1200?"Short clip rejected — switching to a full program":"Video did not start — switching sources");
     },8000);
   }
@@ -72,8 +73,8 @@
     if(!entered)return;
     if(!playerReady){loadApi();return;}
     showPlayer();
-    const key=`${block.id}:${block.movie.videoId}`;
-    if(force||loadedKey!==key){loadedKey=key;player.loadVideoById({videoId:block.movie.videoId,startSeconds:state.mediaSeconds});player.setVolume(100);verifyPlayback(block.movie.videoId);return;}
+    const key=`${block.id}:${state.activeVideoId}`;
+    if(force||loadedKey!==key){loadedKey=key;player.loadVideoById({videoId:state.activeVideoId,startSeconds:state.mediaSeconds});player.setVolume(100);verifyPlayback(state.activeVideoId,state.isIntro);return;}
     if(mode==="live"&&player.getPlayerState()===YT.PlayerState.PLAYING){const drift=state.mediaSeconds-player.getCurrentTime();if(Math.abs(drift)>5)player.seekTo(state.mediaSeconds,true);}
   }
   function enter(){entered=true;els.enter.hidden=true;loadApi();sync(true);}
@@ -82,7 +83,7 @@
   function rewind(){mode="timeshift";shiftBaseMs=currentClock()-30000;shiftStartedMs=Date.now();loadedKey="";sync(true);}
   async function share(){const state=resolve(Date.now()),title=state?state.block.movie.title:"USA Up All Night";const payload={title:`${title} · USA Up All Night`,text:`Watch ${title} on USA Up All Night.`,url:location.href};try{if(navigator.share)await navigator.share(payload);else await navigator.clipboard.writeText(location.href);window.dispatchEvent(new CustomEvent("infinity:share",{detail:{channel:"USA",title,reward:0.1}}));const n=Number(localStorage.getItem("infinity_usa_shares")||0)+1;localStorage.setItem("infinity_usa_shares",String(n));els.shareStatus.textContent=`Shared · ${n%10}/10 toward next Star Coin`; }catch(e){if(!e||e.name!=="AbortError")els.shareStatus.textContent="Share unavailable";}}
 
-  window.onYouTubeIframeAPIReady=function(){player=new YT.Player("player",{width:"100%",height:"100%",playerVars:{playsinline:1,controls:1,rel:0,enablejsapi:1},events:{onReady:()=>{playerReady=true;if(entered)sync(true);},onStateChange:event=>{if(event.data===YT.PlayerState.PLAYING){clearTimeout(playbackTimer);let duration=0;try{duration=Number(player.getDuration())||0;}catch(_){}if(duration&&duration<1200)quarantineCurrent("Short clip rejected — switching to a full program");else recoveryCount=0;}},onError:()=>quarantineCurrent("Source unavailable — switching to another full program")}});};
+  window.onYouTubeIframeAPIReady=function(){player=new YT.Player("player",{width:"100%",height:"100%",playerVars:{playsinline:1,controls:1,rel:0,enablejsapi:1},events:{onReady:()=>{playerReady=true;if(entered)sync(true);},onStateChange:event=>{if(event.data===YT.PlayerState.PLAYING){clearTimeout(playbackTimer);let duration=0;try{duration=Number(player.getDuration())||0;}catch(_){}const state=resolve(currentClock());if(duration&&duration<1200&&!state?.isIntro)quarantineCurrent("Short clip rejected — switching to a full program");else recoveryCount=0;}if(event.data===YT.PlayerState.ENDED){const state=resolve(currentClock());if(state?.isIntro){finishedIntroIds.add(state.activeVideoId);loadedKey="";sync(true);}}},onError:()=>quarantineCurrent("Source unavailable — switching to another full program")}});};
 
   els.enter.addEventListener("click",enter);els.live.addEventListener("click",joinLive);els.start.addEventListener("click",startOver);els.rewind.addEventListener("click",rewind);els.share.addEventListener("click",share);
   ensureSchedule(Date.now());sync(false);loadApi();setInterval(()=>sync(false),1000);
