@@ -7,7 +7,7 @@
   const els={clock:$("stationClock"),title:$("nowTitle"),meta:$("nowMeta"),time:$("programTime"),player:$("player"),card:$("stationCard"),cardTitle:$("stationCardTitle"),enter:$("enterButton"),live:$("liveButton"),start:$("startOverButton"),rewind:$("rewindButton"),share:$("shareButton"),shareStatus:$("shareStatus"),guide:$("guideRows"),next:$("nextCards"),progress:$("progressBar"),position:$("positionLabel")};
 
   let player=null,playerReady=false,apiRequested=false,entered=false,loadedKey="",scheduleKey="",schedule=[];
-  let mode="live",shiftBaseMs=0,shiftStartedMs=0;
+  let mode="live",shiftBaseMs=0,shiftStartedMs=0,playbackTimer=null,recoveryCount=0;
 
   function hash(text){let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return h>>>0;}
   function dayKey(ms){const d=new Date(ms);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
@@ -38,6 +38,29 @@
   function showStation(message){els.card.hidden=false;els.cardTitle.textContent=message||"USA station break — next feature starts on schedule";if(els.player)els.player.style.visibility="hidden";}
   function showPlayer(){els.card.hidden=true;if(els.player)els.player.style.visibility="visible";}
   function loadApi(){if(apiRequested||playerReady)return;apiRequested=true;if(window.YT&&window.YT.Player){window.onYouTubeIframeAPIReady();return;}const s=document.createElement("script");s.src="https://www.youtube.com/iframe_api";document.head.appendChild(s);}
+  function quarantineCurrent(reason){
+    const state=resolve(currentClock());
+    const videoId=state?.block?.movie?.videoId;
+    if(!videoId||failedVideoIds.has(videoId))return;
+    failedVideoIds.add(videoId);
+    clearTimeout(playbackTimer);
+    scheduleKey="";
+    loadedKey="";
+    ensureSchedule(Date.now());
+    recoveryCount++;
+    showStation(reason||"Source unavailable — switching to another full program");
+    setTimeout(()=>sync(true),150);
+  }
+  function verifyPlayback(videoId){
+    clearTimeout(playbackTimer);
+    playbackTimer=setTimeout(()=>{
+      if(!player||loadedKey.indexOf(videoId)<0)return;
+      let state=-1,duration=0;
+      try{state=player.getPlayerState();duration=Number(player.getDuration())||0;}catch(_){}
+      if(state===YT.PlayerState.PLAYING&&duration>=1200){recoveryCount=0;return;}
+      quarantineCurrent(duration>0&&duration<1200?"Short clip rejected — switching to a full program":"Video did not start — switching sources");
+    },8000);
+  }
   function sync(force){
     const state=resolve(currentClock());if(!state)return;const {block}=state;
     els.clock.textContent=new Date().toLocaleTimeString([],{hour:"numeric",minute:"2-digit",second:"2-digit"});
@@ -50,7 +73,7 @@
     if(!playerReady){loadApi();return;}
     showPlayer();
     const key=`${block.id}:${block.movie.videoId}`;
-    if(force||loadedKey!==key){loadedKey=key;player.loadVideoById({videoId:block.movie.videoId,startSeconds:state.mediaSeconds});player.setVolume(100);return;}
+    if(force||loadedKey!==key){loadedKey=key;player.loadVideoById({videoId:block.movie.videoId,startSeconds:state.mediaSeconds});player.setVolume(100);verifyPlayback(block.movie.videoId);return;}
     if(mode==="live"&&player.getPlayerState()===YT.PlayerState.PLAYING){const drift=state.mediaSeconds-player.getCurrentTime();if(Math.abs(drift)>5)player.seekTo(state.mediaSeconds,true);}
   }
   function enter(){entered=true;els.enter.hidden=true;loadApi();sync(true);}
@@ -59,7 +82,7 @@
   function rewind(){mode="timeshift";shiftBaseMs=currentClock()-30000;shiftStartedMs=Date.now();loadedKey="";sync(true);}
   async function share(){const state=resolve(Date.now()),title=state?state.block.movie.title:"USA Up All Night";const payload={title:`${title} · USA Up All Night`,text:`Watch ${title} on USA Up All Night.`,url:location.href};try{if(navigator.share)await navigator.share(payload);else await navigator.clipboard.writeText(location.href);window.dispatchEvent(new CustomEvent("infinity:share",{detail:{channel:"USA",title,reward:0.1}}));const n=Number(localStorage.getItem("infinity_usa_shares")||0)+1;localStorage.setItem("infinity_usa_shares",String(n));els.shareStatus.textContent=`Shared · ${n%10}/10 toward next Star Coin`; }catch(e){if(!e||e.name!=="AbortError")els.shareStatus.textContent="Share unavailable";}}
 
-  window.onYouTubeIframeAPIReady=function(){player=new YT.Player("player",{width:"100%",height:"100%",playerVars:{playsinline:1,controls:1,rel:0,enablejsapi:1},events:{onReady:()=>{playerReady=true;if(entered)sync(true);},onError:()=>{const state=resolve(currentClock());if(state&&state.block.movie.videoId)failedVideoIds.add(state.block.movie.videoId);scheduleKey="";loadedKey="";ensureSchedule(Date.now());showStation("Source unavailable — skipped, not replaced by a short clip");setTimeout(()=>sync(true),250);}}});};
+  window.onYouTubeIframeAPIReady=function(){player=new YT.Player("player",{width:"100%",height:"100%",playerVars:{playsinline:1,controls:1,rel:0,enablejsapi:1},events:{onReady:()=>{playerReady=true;if(entered)sync(true);},onStateChange:event=>{if(event.data===YT.PlayerState.PLAYING){clearTimeout(playbackTimer);let duration=0;try{duration=Number(player.getDuration())||0;}catch(_){}if(duration&&duration<1200)quarantineCurrent("Short clip rejected — switching to a full program");else recoveryCount=0;}},onError:()=>quarantineCurrent("Source unavailable — switching to another full program")}});};
 
   els.enter.addEventListener("click",enter);els.live.addEventListener("click",joinLive);els.start.addEventListener("click",startOver);els.rewind.addEventListener("click",rewind);els.share.addEventListener("click",share);
   ensureSchedule(Date.now());sync(false);loadApi();setInterval(()=>sync(false),1000);
