@@ -16,14 +16,19 @@
   function pick(choices,key,index){if(!choices.length)return null;return choices[hash(`usa:${key}:${index}`)%choices.length];}
   function buildSchedule(ms){
     const key=dayKey(ms),start=dayStart(ms);
+    const usedCartoons=new Set();
     const built=template.map((slot,index)=>{
       let choices=(slot.choices||[]).slice();
-      let chosen=pick(choices,key,index);
+      const playable=choices.filter(name=>programs[name]?.videoId&&!failedVideoIds.has(programs[name].videoId));
+      const unused=slot.type==="cartoon"?playable.filter(name=>!usedCartoons.has(programs[name].videoId)):playable;
+      const pool=unused.length?unused:playable;
+      let chosen=pick(pool,key,index);
       let item=programs[chosen];
       if(!item||!item.videoId||failedVideoIds.has(item.videoId)){
         chosen=choices.find(k=>programs[k]&&programs[k].videoId&&!failedVideoIds.has(programs[k].videoId));
         item=programs[chosen];
       }
+      if(slot.type==="cartoon"&&item?.videoId)usedCartoons.add(item.videoId);
       return {id:`${key}-${index}`,movie:item,choices,startsAtMs:start+slot.minute*60000,endsAtMs:start+(slot.minute+slot.duration)*60000,blockSeconds:slot.duration*60,type:slot.type||"show"};
     }).filter(x=>x.movie);
     return built;
